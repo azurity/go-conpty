@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -152,24 +155,49 @@ func getStartupInfoExForPTY(hpc _HPCON) (*_StartupInfoEx, error) {
 	return &siEx, nil
 }
 
-func createConsoleProcessAttachedToPTY(hpc _HPCON, commandLine string) (*windows.ProcessInformation, error) {
-	cmdLine, err := windows.UTF16PtrFromString(commandLine)
+func createConsoleProcessAttachedToPTY(hpc _HPCON, cmd *exec.Cmd) (*windows.ProcessInformation, error) {
+	if cmd.Process != nil {
+		return nil, errors.New("exec: already started")
+	}
+	argv0, err := lookExtensions(cmd.Path, cmd.Dir)
 	if err != nil {
 		return nil, err
 	}
+	cmd.Path = argv0
+
+	//env := cmd.Env
+	//if env == nil {
+	//	env = syscall.Environ()
+	//}
+	//env = addCriticalEnv(dedupEnv(env))
+
+	argv0p, err := windows.UTF16PtrFromString(argv0)
+	if err != nil {
+		return nil, err
+	}
+
+	cmdline := makeCmdLine(argv(cmd))
+	var argvp *uint16
+	if len(cmdline) != 0 {
+		argvp, err = windows.UTF16PtrFromString(cmdline)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	siEx, err := getStartupInfoExForPTY(hpc)
 	if err != nil {
 		return nil, err
 	}
 	var pi windows.ProcessInformation
 	err = windows.CreateProcess(
-		nil, // use this if no args
-		cmdLine,
-		nil,
+		argv0p, // use this if no args
+		argvp,
+		nil, // cmd.SysProcAttr.ProcessAttributes,
 		nil,
 		false, // inheritHandle
 		windows.EXTENDED_STARTUPINFO_PRESENT,
-		nil,
+		nil, //createEnvBlock(env),
 		nil,
 		&siEx.startupInfo,
 		&pi)
@@ -205,6 +233,32 @@ func (cpty *ConPty) Close() error {
 		cpty.ptyOut.handle,
 		cpty.cmdIn.handle,
 		cpty.cmdOut.handle)
+}
+
+func (cpty *ConPty) Kill() error {
+	return cpty.Signal(os.Kill)
+}
+
+func (cpty *ConPty) Signal(sig os.Signal) error {
+	handle := uintptr(cpty.pi.Process)
+	if handle == uintptr(syscall.InvalidHandle) {
+		return syscall.EINVAL
+	}
+	//if cpty.done() {
+	//	return os.ErrProcessDone
+	//}
+	if sig == os.Kill {
+		var terminationHandle syscall.Handle
+		e := syscall.DuplicateHandle(^syscall.Handle(0), syscall.Handle(handle), ^syscall.Handle(0), &terminationHandle, syscall.PROCESS_TERMINATE, false, 0)
+		if e != nil {
+			return os.NewSyscallError("DuplicateHandle", e)
+		}
+		defer syscall.CloseHandle(terminationHandle)
+		e = syscall.TerminateProcess(syscall.Handle(terminationHandle), 1)
+		return os.NewSyscallError("TerminateProcess", e)
+	}
+	// TODO(rsc): Handle Interrupt too?
+	return syscall.Errno(syscall.EWINDOWS)
 }
 
 // Wait for the process to exit and return the exit code. If context is canceled,
@@ -258,7 +312,7 @@ func ConPtyDimensions(width, height int) ConPtyOption {
 //
 // On successful return, an instance of ConPty is returned. You must call Close() on this to release
 // any resources associated with the process. To get the exit code of the process, you can call Wait().
-func Start(commandLine string, options ...ConPtyOption) (*ConPty, error) {
+func Start(commandLine *exec.Cmd, options ...ConPtyOption) (*ConPty, error) {
 	if !IsConPtyAvailable() {
 		return nil, ErrConPtyUnsupported
 	}

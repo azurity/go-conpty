@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"os/exec"
 	"time"
 
-	"github.com/admpub/conpty"
+	"github.com/azurity/go-conpty"
 )
 
 func main() {
-	commandLine := `c:\windows\system32\cmd.exe`
-	cpty, err := conpty.Start(commandLine)
+	cpty, err := conpty.Start(exec.Command("cmd"))
 	if err != nil {
 		log.Fatalf("Failed to spawn a pty:  %v", err)
 	}
